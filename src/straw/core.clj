@@ -37,7 +37,8 @@
      :port (js/parseInt (get raw "port"))
      :method "GET"      ;; this is ghetto
      :path (get raw "pathname")}))
-
+     ;:path-parts (.split (get raw "pathname") "/")
+;
 (def page-data (atom []))
 
 (defn list-handler [val]
@@ -47,7 +48,10 @@
   (.version "0.0.1")
   (.usage "[options] <url>")
   (.option "-o, --outfile [type]" "the file to download to")
-  (.option "-r, --showresources <items>" "a comma separated list of tags to parse for" list-handler)
+  ;(.option "-r, --showresources <items>" "a comma separated list of tags to parse for" list-handler)
+  ;(.option "-nc, --noclobber" "")
+  (.option "-r, --recursive" "Turn on recursive retrieving")
+  (.option "-l, --level [depth]" "Specify recursive maximum depth level, default is 5")
   (.parse process.argv))
 
 (defn download-file
@@ -60,38 +64,51 @@
                  (.on "data" (fn [chunk]
                                  (swap! page-data assoc (count @page-data) chunk)))
                  (.on "end" (fn [] 
-                              (if (or (not    (.outfile commander))
-                                      (not (= (.outfile commander) "-")))
-                                (let [parts (js->clj (.split (:path params) "/"))
-                                      file-name (if (.outfile commander)
-                                                    (.outfile commander)
-                                                    (first (reverse parts)))]
-                                  (. fs (writeFileSync file-name (apply str @page-data) )))
-                                ; intended that passing -o - would print to stdout, but commander can't handle this
-                                (prn (apply str @page-data)) )
-                              (if (.showresources commander)
-                                  (let [window (.. jsdom (jsdom (apply str @page-data)) (createWindow))
-                                        tag-list (js->clj (.showresources commander))]
-                                    ;; ref for trying to get goog.dom parsing in nodejs
-                                    ;(. goog.dom (setDocument (.document window)))
-                                    ;anchors (dom/getElementsByTagNameAndClass "a")]
-                                    (doseq [tag tag-list]
-                                      (let [anchors (.. window document (getElementsByTagName tag))]
-                                        (prn (str "--- Showing: " tag " ---"))
-                                        (doseq [i (range (.length anchors))]
-                                          (let [elem (. anchors (item i))
-                                                info (cond (= "a" tag) (str ": " (. elem (getAttribute "href")))
-                                                           (= "img" tag) (str ": " (. elem (getAttribute "src")))
-                                                           :else "") ]
-                                            ;; NOTE: this currently throws errors if the innerHTML is not plain textnode
-                                            (prn (str (.innerHTML elem) info)))) )) ))
+                              (let [parts (js->clj (.split (:path params) "/"))
+                                    headers (into {} (for [l (js->clj (.headers res))] 
+                                                          [(keyword (l 0)) (l 1)])) ]
+                                (if (or (not    (.outfile commander))
+                                        (not (= (.outfile commander) "-")))
+                                  (let [file-name (if (.outfile commander)
+                                                      (.outfile commander)
+                                                      (first (reverse parts)))]
+                                    (. fs (writeFileSync file-name (apply str @page-data) )))
+                                  ;; intended that passing -o - would print to stdout, but commander can't handle this
+                                  (prn (apply str @page-data)) )
+                                ;; need an AND here to catch if it's not HTML content
+                                (if (.recursive commander) 
+                                         ;(. (js/RegExp "text/html") (test (:content-type header)) )) 
+                                    (let [window (.. jsdom (jsdom (apply str @page-data)) (createWindow))
+                                          tag-list ["a" "img"]]
+                                      (doseq [tag tag-list]
+                                        (let [elems (.. window document (getElementsByTagName tag))]
+                                          (prn (str "--- Showing: " tag " ---"))
+                                          (doseq [i (range (.length elems))]
+                                            (let [elem (. elems (item i))
+                                                  new-url (cond (= "a" tag) (. elem (getAttribute "href"))
+                                                                       (= "img" tag) (. elem (getAttribute "src"))
+                                                                       :else "") 
+                                                  new-url-params (cond (. new-url (match #"^/")) {:path new-url
+                                                                                                  :host (:host params)
+                                                                                                  :port (:port params)
+                                                                                                  :protocol (:protocol params)}
+                                                                       (. new-url (match #"^https?://")) (url-parse new-url)
+                                                                       :else {})
+                                                  new-path-parts (if (:path new-url-params) (.split (:path new-url-params) "/") []) 
+                                                  new-full-url (apply str [(:protocol new-url-params) 
+                                                                           "://"
+                                                                            (:host new-url-params)
+                                                                            (:path new-url-params)]) ]
+                                              ;; NOTE: this currently throws errors if the innerHTML is not plain textnode
+                                              (prn (str new-full-url))
+                                              (if (= tag "img")
+                                                  (download-file new-full-url))
+                                            )) )) )))
                               ))) )))]
         (doto req
           (.write "data\n")
           (.write "data\n")
           (.end) ) ) )
-  
-; '(:link :a :img :script :style)
 
 (defn start [& _]
   (let [url-list (js->clj (.args commander))]
